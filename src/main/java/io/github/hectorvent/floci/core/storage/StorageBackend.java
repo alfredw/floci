@@ -13,6 +13,16 @@ import java.util.function.Predicate;
  */
 public interface StorageBackend<K, V> {
 
+    /** Whether acknowledged mutations synchronously commit to local storage. */
+    default boolean synchronousPersistence() {
+        return false;
+    }
+
+    /** Fence the store after a service-owned body write fails. */
+    default StoragePersistenceException persistenceFailure(java.io.IOException cause) {
+        return new StoragePersistenceException(cause);
+    }
+
     void put(K key, V value);
 
     Optional<V> get(K key);

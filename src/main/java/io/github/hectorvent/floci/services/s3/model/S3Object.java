@@ -50,6 +50,7 @@ public class S3Object {
     // for that read's full duration.
     @JsonIgnore
     private String dataGeneration;
+    private String bodyGeneration;
 
     public S3Object() {
         this.metadata = new HashMap<>();
@@ -150,6 +151,9 @@ public class S3Object {
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
+
+    public String getBodyGeneration() { return bodyGeneration; }
+    public void setBodyGeneration(String generation) { this.bodyGeneration = generation; }
 
     public String getDataGeneration() { return dataGeneration; }
     public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
