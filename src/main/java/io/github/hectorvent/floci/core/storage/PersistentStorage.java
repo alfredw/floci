@@ -4,129 +4,129 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import org.jboss.logging.Logger;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
-/**
- * JSON file-backed persistent storage.
- * Loads all data into memory on startup for fast reads.
- * Write-through on every put/delete.
- * Uses atomic writes (temp file + rename) for safety.
- */
+/** Synchronous snapshots. Failed commits fence this instance until restart. */
 public class PersistentStorage<K, V> implements StorageBackend<K, V> {
-
-    private static final Logger LOG = Logger.getLogger(PersistentStorage.class);
-
-    private final ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
+    private Map<K, V> store = new HashMap<>();
     private final Path filePath;
-    private final ObjectMapper objectMapper;
-    private final TypeReference<Map<K, V>> typeReference;
+    private final ObjectMapper mapper;
+    private final TypeReference<Map<K, V>> type;
+    private final DurableFiles files;
+    private StoragePersistenceException failure;
 
-    public PersistentStorage(Path filePath, TypeReference<Map<K, V>> typeReference) {
-        this.filePath = filePath;
-        this.typeReference = typeReference;
-        this.objectMapper = new ObjectMapper();
-        this.objectMapper.registerModule(new JavaTimeModule());
-        this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
+    public PersistentStorage(Path path, TypeReference<Map<K, V>> type) {
+        this(path, type, new DurableFiles());
+    }
+
+    PersistentStorage(Path path, TypeReference<Map<K, V>> type, DurableFiles files) {
+        this.filePath = path;
+        this.type = type;
+        this.files = files;
+        mapper = new ObjectMapper().registerModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .enable(SerializationFeature.INDENT_OUTPUT);
     }
 
     @Override
-    public void put(K key, V value) {
-        store.put(key, value);
-        persistToDisk();
+    public boolean synchronousPersistence() {
+        return true;
     }
 
     @Override
-    public Optional<V> get(K key) {
+    public synchronized StoragePersistenceException persistenceFailure(IOException cause) {
+        if (failure == null) {
+            failure = new StoragePersistenceException(cause);
+        }
+        return failure;
+    }
+
+    private void checkHealthy() {
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    @Override
+    public synchronized void put(K key, V value) {
+        checkHealthy();
+        Map<K, V> candidate = new HashMap<>(store);
+        candidate.put(key, value);
+        commit(candidate);
+    }
+
+    @Override
+    public synchronized Optional<V> get(K key) {
+        checkHealthy();
         return Optional.ofNullable(store.get(key));
     }
 
     @Override
-    public void delete(K key) {
-        store.remove(key);
-        persistToDisk();
+    public synchronized void delete(K key) {
+        checkHealthy();
+        Map<K, V> candidate = new HashMap<>(store);
+        candidate.remove(key);
+        commit(candidate);
     }
 
     @Override
-    public List<V> scan(Predicate<K> keyFilter) {
-        return store.entrySet().stream()
-                .filter(e -> keyFilter.test(e.getKey()))
-                .map(Map.Entry::getValue)
-                .collect(Collectors.toCollection(ArrayList::new));
+    public synchronized List<V> scan(Predicate<K> filter) {
+        checkHealthy();
+        return store.entrySet().stream().filter(e -> filter.test(e.getKey()))
+                .map(Map.Entry::getValue).collect(Collectors.toCollection(ArrayList::new));
     }
 
     @Override
-    public Set<K> keys() {
-        return Collections.unmodifiableSet(store.keySet());
+    public synchronized Set<K> keys() {
+        checkHealthy();
+        return Set.copyOf(store.keySet());
     }
 
     @Override
-    public void flush() {
-        persistToDisk();
+    public synchronized void flush() {
+        checkHealthy();
+        commit(new HashMap<>(store));
     }
 
     @Override
-    public void load() {
-        if (!Files.exists(filePath)) {
-            LOG.debugv("No persistent file found at {0}, starting with empty store", filePath);
+    public synchronized void load() {
+        checkHealthy();
+        if (Files.notExists(filePath)) {
             return;
         }
         try {
-            Map<K, V> data = objectMapper.readValue(filePath.toFile(), typeReference);
-            store.clear();
-            store.putAll(data);
-            LOG.infov("Loaded {0} entries from {1}", store.size(), filePath);
+            Map<K, V> loaded = mapper.readValue(filePath.toFile(), type);
+            if (loaded == null) {
+                throw new IOException("Persistent snapshot must be an object");
+            }
+            store = loaded;
         } catch (IOException e) {
-            // Starting empty here silently drops all persisted state for this store, which can leave
-            // other services (e.g. CloudFormation) referencing resources that now appear missing
-            // (see issue #1634). Quarantine the unreadable file and log loudly so the data loss is
-            // detectable rather than masquerading as an empty store.
-            quarantineUnreadableFile(e);
-        }
-    }
-
-    private void quarantineUnreadableFile(IOException cause) {
-        Path quarantine = filePath.resolveSibling(filePath.getFileName() + ".corrupt");
-        try {
-            Files.move(filePath, quarantine, StandardCopyOption.REPLACE_EXISTING);
-            LOG.errorv(cause, "Failed to load persisted data from {0}; moved the unreadable file to "
-                    + "{1} and started with an empty store. This store's state was lost.",
-                    filePath, quarantine);
-        } catch (IOException moveError) {
-            LOG.errorv(cause, "Failed to load persisted data from {0}; could not quarantine it ({1}). "
-                    + "Starting with an empty store. This store's state was lost.",
-                    filePath, moveError.getMessage());
+            throw persistenceFailure(e);
         }
     }
 
     @Override
-    public void clear() {
-        store.clear();
-        persistToDisk();
+    public synchronized void clear() {
+        checkHealthy();
+        commit(new HashMap<>());
     }
 
-    private synchronized void persistToDisk() {
+    private void commit(Map<K, V> candidate) {
         try {
-            Files.createDirectories(filePath.getParent());
-            Path tempFile = filePath.resolveSibling(filePath.getFileName() + ".tmp");
-            objectMapper.writeValue(tempFile.toFile(), store);
-            Files.move(tempFile, filePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            files.replace(filePath, mapper.writeValueAsBytes(candidate));
+            store = candidate;
         } catch (IOException e) {
-            LOG.errorv(e, "Failed to persist data to {0}", filePath);
+            throw persistenceFailure(e);
         }
     }
 }

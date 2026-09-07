@@ -31,6 +31,16 @@ import java.util.stream.Collectors;
  */
 public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
 
+    @Override
+    public boolean synchronousPersistence() {
+        return delegate.synchronousPersistence();
+    }
+
+    @Override
+    public StoragePersistenceException persistenceFailure(java.io.IOException cause) {
+        return delegate.persistenceFailure(cause);
+    }
+
     /** A stored value together with its owning AWS account and account-relative key. */
     public record AccountEntry<T>(String accountId, String key, T value) {}
 

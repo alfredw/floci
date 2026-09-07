@@ -13,6 +13,25 @@ Floci supports four storage backends. You can set a global default and override 
 
 ## Global Configuration
 
+In this downstream fork, `persistent` commits snapshots using file sync, atomic
+replacement, and directory sync before acknowledging mutations. An I/O failure
+fences the affected backend: repair storage and restart before reading or writing
+it again. Shutdown will not flush a failed backend. Corrupt committed snapshots
+prevent startup and remain untouched for recovery; they are not replaced with an
+empty store.
+
+Persistent S3 unversioned writes use immutable body generations referenced by the
+committed metadata. This preserves the previous object if replacement metadata
+cannot commit. An interrupted request can have an uncertain outcome, but a
+successful response follows the durable commit. Unreferenced generations are
+retained until an explicit volume reset; no automatic garbage collection runs.
+
+This local simulation requires one Floci process per volume and a filesystem with
+atomic rename and file/directory sync support. Legacy objects remain readable,
+but older binaries cannot be assumed to read newly written generation references.
+WAL, hybrid, and versioned/multipart multi-record crash consistency have not gained
+this guarantee. See [Nerv storage evaluation](../nerv-storage-evaluation.md).
+
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_STORAGE_MODE` | `memory` | Storage backend (`memory`, `persistent`, `hybrid`, `wal`) |

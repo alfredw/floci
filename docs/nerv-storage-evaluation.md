@@ -105,7 +105,7 @@ failure probes. It established owner/BEAM recovery and transport-failure behavio
 No MinIO data-loss result is asserted here, and the Floci result alone does not
 establish a comparative MinIO durability guarantee.
 
-## Remaining work
+## Original remaining work
 
 The signature implementation makes Floci useful for the required protocol and
 retry tests. Storage configuration alone does not meet the durable-acceptance
@@ -117,3 +117,43 @@ Keep `origin` pointing to `alfredw/floci` and `upstream` pointing to
 `floci-io/floci`. Fetch upstream and merge its main branch into the feature
 branch when incorporating later releases; do not push Nerv-specific work to
 upstream without a separate contribution decision.
+
+## Persistent-mode implementation
+
+The downstream persistence change addresses the acknowledged-write failure in
+`persistent` mode. Mutations commit a synced atomic snapshot before publication;
+failed storage stays fenced until restart. Corrupt metadata fails startup without
+moving or replacing evidence. S3 maps storage failures to XML `InternalError` with
+HTTP 500.
+
+Unversioned S3 writes sync an immutable body generation before committing its
+metadata reference. Readers use that reference; deletion commits metadata removal
+without reclaiming body files. Existing canonical body files remain readable.
+Unreferenced generations accumulate in the disposable volume until explicit reset.
+
+The guarantee targets durable_server's unversioned operations on a single local
+Floci process. Versioned/multipart multi-record atomicity, WAL repair, automatic
+recovery from I/O errors, native-image packaging, and physical power-loss testing
+remain outside this change. The wire protocol and signature-validation setting
+are unchanged.
+
+Validation on 2026-09-07:
+
+- `mvn -B '-Dtest=Persistent*Test,S3*Test,PreSignedUrl*Test,AccountAwareStorageBackendTest' package`:
+  1,240 cases, zero failures/errors, three existing platform/permission skips.
+- New tests cover failed create/overwrite/delete/clear, file sync, atomic rename,
+  directory sync, fencing, corruption, legacy bodies, missing bodies, concurrent
+  conditional writes, and abrupt child-JVM exits at commit boundaries. A signed
+  HTTP integration test checks the S3 error response and restart requirement.
+- The monolithic full Java run exited 137 during Quarkus startup. Eight sequential
+  partitions using the repository's CI partitioner executed 17,785 cases with
+  53 failures, 46 errors, and 17 skips. Docker-backed services cannot reach the
+  Docker socket inside this test container. Representative ECR and Lambda failures
+  reproduce on unchanged fork main `ee645d29`; this is not a green full-suite result.
+- Nerv's retained standalone harness passed all 24 cases with 100% harness
+  coverage. Its application gate passed 255 cases at 98.3% coverage; all 29
+  JavaScript cases passed. The separate-process application proof recovered an
+  accepted edit and its original receipt through startup discovery and Oban.
+
+The Nerv reference-based integration retains the repeatable fixture and detailed
+evidence separately from the original MinIO results.

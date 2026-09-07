@@ -95,6 +95,7 @@ floci:
   ai-mock-config-file: ${AI_MOCK_CONFIG:}
   storage:
     # Supported modes: memory, persistent, hybrid, wal
+    # Persistent mode uses synced commits and requires restart after storage I/O failure.
     mode: memory
     persistent-path: ./data
     host-persistent-path: ./data

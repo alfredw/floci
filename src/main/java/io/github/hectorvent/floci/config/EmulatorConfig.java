@@ -330,6 +330,7 @@ public interface EmulatorConfig {
     }
 
     interface S3StorageConfig {
+        /** Persistent mode synchronously commits unversioned bodies and metadata. */
         Optional<String> mode();
     }
 

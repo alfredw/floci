@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.DurableFiles;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -542,7 +543,16 @@ public class S3Service implements Resettable, ResourceProvider {
 
             // Write the body before publishing metadata - see the comment in the versioned
             // branch above; the same ordering requirement applies here.
-            writeFile(bucketName, key, data);
+            if (objectStore.synchronousPersistence()) {
+                object.setBodyGeneration(object.getDataGeneration());
+                try {
+                    new DurableFiles().replace(generationPath(object), data);
+                } catch (IOException e) {
+                    throw objectStore.persistenceFailure(e);
+                }
+            } else {
+                writeFile(bucketName, key, data);
+            }
             // Release the cached payload before publishing - see the comment in the versioned
             // branch above; the same race applies here.
             object.setData(null);
@@ -953,7 +963,8 @@ public class S3Service implements Resettable, ResourceProvider {
             // An explicit version's file is immutable once written (see storeObjectInternal) and
             // never reused by a later PUT, so this pairing can never race a concurrent overwrite.
             S3Object obj = getObjectMetadata(bucketName, key, versionId);
-            obj.setData(readVersionedFile(bucketName, key, versionId));
+            obj.setData(obj.getBodyGeneration() != null ? readGeneration(obj)
+                    : readVersionedFile(bucketName, key, versionId));
             return obj;
         }
         return getLatestObject(bucketName, key);
@@ -988,7 +999,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // with a clear error instead of spinning forever re-reading the file and exhausting the heap.
         for (int attempt = 0; attempt < 10_000; attempt++) {
             S3Object obj = getObjectMetadata(bucketName, key, null);
-            byte[] data = readFile(bucketName, key);
+            byte[] data = obj.getBodyGeneration() != null ? readGeneration(obj) : readFile(bucketName, key);
             synchronized (bucket) {
                 S3Object current = resolveObject(storeKey).orElse(null);
                 if (current != null && !current.isDeleteMarker()
@@ -1030,7 +1041,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public InputStream openObjectStream(String bucketName, String key, String versionId) {
-        getObjectMetadata(bucketName, key, versionId);
+        S3Object metadata = getObjectMetadata(bucketName, key, versionId);
         if (inMemory) {
             byte[] data = versionId != null
                     ? memoryDataStore.get(physicalVersionedKey(bucketName, key, versionId))
@@ -1041,11 +1052,14 @@ public class S3Service implements Resettable, ResourceProvider {
             return new ByteArrayInputStream(data);
         }
         try {
-            Path path = versionId != null
+            Path path = metadata.getBodyGeneration() != null ? generationPath(metadata) : versionId != null
                     ? resolveVersionedPathForRead(bucketName, key, versionId)
                     : resolveObjectPathForRead(bucketName, key);
             return Files.newInputStream(path);
         } catch (IOException e) {
+            if (objectStore.synchronousPersistence()) {
+                throw objectStore.persistenceFailure(e);
+            }
             throw new UncheckedIOException("Failed to open S3 object stream", e);
         }
     }
@@ -1141,6 +1155,14 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
 
+        synchronized (bucket) {
+            return deleteObjectInternal(bucket, bucketName, key, versionId, bypassGovernance);
+        }
+    }
+
+    private S3Object deleteObjectInternal(Bucket bucket, String bucketName, String key,
+                                          String versionId, boolean bypassGovernance) {
+
         if (bucket.isVersioningEnabled() && versionId == null) {
             // Check lock on current latest before placing a delete marker
             objectStore.get(objectKey(bucketName, key)).ifPresent(prev -> {
@@ -1218,7 +1240,9 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             // Non-versioned delete
             objectStore.delete(objectKey(bucketName, key));
-            deleteFile(bucketName, key);
+            if (!objectStore.synchronousPersistence()) {
+                deleteFile(bucketName, key);
+            }
             LOG.debugv("Deleted object: {0}/{1}", bucketName, key);
             fireNotifications(bucketName, key, "ObjectRemoved:Delete", null);
             return null;
@@ -3498,6 +3522,7 @@ public class S3Service implements Resettable, ResourceProvider {
         copy.setLegalHoldStatus(source.getLegalHoldStatus());
         copy.setAcl(source.getAcl());
         copy.setDataGeneration(source.getDataGeneration());
+        copy.setBodyGeneration(source.getBodyGeneration());
         return copy;
     }
 
@@ -3662,6 +3687,27 @@ public class S3Service implements Resettable, ResourceProvider {
             safeKey = safeKey.substring(1);
         }
         return dataRoot.resolve(bucketName).normalize().resolve(safeKey + DATA_SUFFIX);
+    }
+
+    private byte[] readGeneration(S3Object object) {
+        try {
+            return Files.readAllBytes(generationPath(object));
+        } catch (IOException e) {
+            throw objectStore.persistenceFailure(e);
+        }
+    }
+
+    private Path generationPath(S3Object object) throws IOException {
+        String generation = object.getBodyGeneration();
+        try {
+            if (!UUID.fromString(generation).toString().equals(generation)) {
+                throw new IllegalArgumentException("Noncanonical generation");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Invalid persisted body generation", e);
+        }
+        return dataRoot.resolve(ACCOUNT_STORAGE_ROOT).resolve(ownerId())
+                .resolve(".generations").resolve(generation + DATA_SUFFIX);
     }
 
     /**
