@@ -1031,6 +1031,9 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean enforceAuth();
 
+        @WithDefault("false")
+        boolean validateHeaderSignatures();
+
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
 

@@ -21,6 +21,7 @@ Floci is configured exclusively through environment variables. Every option belo
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | When `true`, verifies S3 presigned URL signatures |
+| `FLOCI_SERVICES_S3_VALIDATE_HEADER_SIGNATURES` | `false` | Verify S3 SigV4 Authorization headers and signed payload hashes; reject unsigned non-presigned S3 requests |
 | `FLOCI_AUTH_PRESIGN_SECRET` | `local-emulator-secret` | Secret used to sign and verify pre-signed URLs |
 
 ## Browser CORS

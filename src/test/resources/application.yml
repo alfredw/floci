@@ -122,6 +122,7 @@ floci:
     s3:
       enabled: true
       enforce-auth: false
+      validate-header-signatures: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
     dynamodb:
